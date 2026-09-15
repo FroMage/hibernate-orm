@@ -15,11 +15,11 @@ import org.hibernate.processor.ProcessLaterException;
 import org.hibernate.processor.model.ImportContext;
 import org.hibernate.processor.model.MetaAttribute;
 import org.hibernate.processor.spi.AnnotationMetaEntityContext;
-import org.hibernate.processor.spi.QuarkusDataTypeNames;
+import org.hibernate.processor.spi.HibernateProcessorExtension;
+import org.hibernate.processor.spi.SessionSetup;
 import org.hibernate.processor.model.Metamodel;
 import org.hibernate.processor.util.AccessTypeInformation;
 import org.hibernate.processor.util.Constants;
-import org.hibernate.processor.util.StringUtil;
 import org.hibernate.processor.util.TypeUtils;
 import org.hibernate.processor.validation.ProcessorSessionFactory;
 import org.hibernate.processor.validation.Validation;
@@ -68,7 +68,6 @@ import java.util.stream.Stream;
 
 import jakarta.persistence.AccessType;
 
-import static java.lang.Integer.parseInt;
 import static org.antlr.v4.runtime.Token.DEFAULT_CHANNEL;
 import static org.hibernate.grammars.hql.HqlLexer.RIGHT_PAREN;
 import static org.hibernate.grammars.hql.HqlLexer.WITHIN;
@@ -101,14 +100,12 @@ import static org.hibernate.processor.util.StringUtil.removeDollar;
 import static org.hibernate.processor.util.TypeUtils.containsAnnotation;
 import static org.hibernate.processor.util.TypeUtils.determineAccessTypeForHierarchy;
 import static org.hibernate.processor.util.TypeUtils.determineAnnotationSpecifiedAccessType;
-import static org.hibernate.processor.util.TypeUtils.extendsClass;
 import static org.hibernate.processor.util.TypeUtils.findMappedSuperElement;
 import static org.hibernate.processor.util.TypeUtils.getAnnotationMirror;
 import static org.hibernate.processor.util.TypeUtils.getAnnotationValue;
 import static org.hibernate.processor.util.TypeUtils.getGeneratedClassFullyQualifiedName;
 import static org.hibernate.processor.util.TypeUtils.getInheritedAnnotationMirror;
 import static org.hibernate.processor.util.TypeUtils.hasAnnotation;
-import static org.hibernate.processor.util.TypeUtils.implementsInterface;
 import static org.hibernate.processor.util.TypeUtils.isPluralAttribute;
 import static org.hibernate.processor.util.TypeUtils.primitiveClassMatchesKind;
 import static org.hibernate.processor.util.TypeUtils.propertyName;
@@ -137,7 +134,6 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 	private final Context context;
 	private final boolean managed;
 	private boolean jakartaDataRepository;
-	private final boolean quarkusInjection;
 	private final boolean springInjection;
 	private String qualifiedName;
 	private final boolean jakartaDataStaticModel;
@@ -196,7 +192,6 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		this.managed = managed;
 		this.primaryEntity = primaryEntity;
 		members = new LinkedHashMap<>();
-		quarkusInjection = context.isQuarkusInjection();
 		springInjection = context.isSpringInjection();
 		importContext = parent != null ? parent : new ImportContextImpl( getPackageName( context, element ) );
 		jakartaDataStaticModel = jakartaDataStaticMetamodel;
@@ -266,7 +261,8 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		return removeDollar( element.getSimpleName().toString() );
 	}
 
-	private String getConstructorName() {
+	@Override
+	public String getConstructorName() {
 		return getSimpleName() + '_';
 	}
 
@@ -363,7 +359,8 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		return repository;
 	}
 
-	boolean isJakartaDataRepository() {
+	@Override
+	public boolean isJakartaDataRepository() {
 		return jakartaDataRepository;
 	}
 
@@ -485,7 +482,7 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 
 			addIdClassIfNeeded( fieldsOfClass, gettersAndSettersOfClass );
 
-			if ( hasAnnotation( element, ENTITY ) && isQuarkusDataType( element ) && !jakartaDataStaticModel ) {
+			if ( hasAnnotation( element, ENTITY ) && context.getExtension().isExtensionEntity( element ) && !jakartaDataStaticModel ) {
 				addRepositoryMembers( element );
 			}
 		}
@@ -542,7 +539,7 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 	}
 
 	private void addRepositoryMembers(TypeElement element) {
-		context.quarkusDataTypeNames().addRepositoryMembers( element, this );
+		context.getExtension().addRepositoryMembers( element, this );
 	}
 
 	@Override
@@ -566,13 +563,46 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 	}
 
 	@Override
-	public boolean usesReactiveClasspath() {
-		return context.usesQuarkusReactiveCommon();
+	public boolean addInjectAnnotation() {
+		return context.addInjectAnnotation();
 	}
 
 	@Override
-	public boolean quarkusInjection() {
-		return quarkusInjection;
+	public boolean addNonnullAnnotation() {
+		return context.addNonnullAnnotation();
+	}
+
+	@Override
+	public void setSessionGetter(String getter) {
+		this.sessionGetter = getter;
+	}
+
+	@Override
+	public List<? extends Element> getAllMembers(TypeElement type) {
+		return context.getAllMembers( type );
+	}
+
+	@Override
+	public void addRepositoryConstructor(String name, String sessionType) {
+		final var sessionVariableName = getSessionVariableName( sessionType );
+		putMember( name,
+				new RepositoryConstructor(
+						this,
+						getConstructorName(),
+						name,
+						sessionType,
+						sessionVariableName,
+						dataStore(),
+						context.addInjectAnnotation(),
+						context.addNonnullAnnotation(),
+						false,
+						false,
+						context.getExtension().qualifierAnnotation()
+				)
+		);
+		if ( isProvidedSessionAccess( sessionType ) ) {
+			sessionGetter = name + "()";
+		}
 	}
 
 	private List<MetaAttribute> getIdMemberNames(List<VariableElement> fields, List<ExecutableElement> methods) {
@@ -863,7 +893,8 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		) );
 	}
 
-	private @Nullable String dataStore() {
+	@Override
+	public @Nullable String dataStore() {
 		final AnnotationMirror repo = getAnnotationMirror( element, JD_REPOSITORY );
 		if ( repo != null ) {
 			final AnnotationValue dataStoreValue = getAnnotationValue( repo, "dataStore" );
@@ -881,31 +912,20 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		if ( element.getTypeParameters().isEmpty() ) {
 			jakartaDataRepository = hasAnnotation( element, JD_REPOSITORY );
 			final ExecutableElement getter = findSessionGetter( element );
-			if ( getter != null ) {
-				// Never make a DAO for Panache subtypes
-				if ( !isPanacheType( element ) && !isQuarkusDataType( element ) ) {
+			final HibernateProcessorExtension extension = context.getExtension();
+
+			final SessionSetup setup = extension.setupRepositorySession( element, getter, this );
+			if ( setup != null ) {
+				sessionType = setup.sessionType();
+				if ( setup.isRepository() ) {
 					repository = true;
-					sessionType = addRepositoryConstructor( getter );
-				}
-				else if ( !isQuarkusDataRepository( element, context.quarkusDataTypeNames() ) && !isQuarkusDataType( element ) ) {
-					// For Panache 1 subtypes, we look at the session type, but no DAO,
-					// we want static methods
-					sessionType = fullReturnType( getter );
-				}
-				else {
-					// For Panache 2 repositories we want a repository
-					repository = true;
-					sessionType = setupQuarkusRepositoryConstructor( getter, element );
 				}
 			}
-			else if ( element.getKind() == ElementKind.INTERFACE
-					&& !jakartaDataRepository
-					&& (context.usesQuarkusOrm() || context.usesQuarkusReactive() || context.usesQuarkusDataHibernate()) ) {
-				// if we don't have a getter, and not a JD repository, but we're in Quarkus,
-				// we know how to find the default sessions
+			else if ( getter != null ) {
 				repository = true;
-				sessionType = setupQuarkusRepositoryConstructor( null, element );
+				sessionType = addRepositoryConstructor( getter );
 			}
+
 			if ( !repository && jakartaDataRepository ) {
 				repository = true;
 				// Jakarta Data defaults to StatelessSession, not EntityManager
@@ -943,16 +963,17 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 	 * because in Quarkus we can inject a container-managed
 	 * {@code StatelessSession} directly.
 	 */
-	boolean needsDefaultConstructor() {
+	@Override
+	public boolean needsDefaultConstructor() {
 		return jakartaDataRepository
-			&& !quarkusInjection
+			&& context.getExtension().qualifierAnnotation() == null
 			&& !springInjection
 			&& context.isCdiAvailable();
 	}
 
 	private @Nullable ExecutableElement findSessionGetter(TypeElement type) {
 		if ( !hasAnnotation( type, ENTITY, MAPPED_SUPERCLASS, EMBEDDABLE )
-			|| isPanacheType( type ) ) {
+			|| context.getExtension().isExtensionEntity( type ) ) {
 			for ( ExecutableElement method : methodsIn( type.getEnclosedElements() ) ) {
 				if ( isSessionGetter( method ) ) {
 					return method;
@@ -999,34 +1020,6 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		return sessionType.startsWith( SPRING_OBJECT_PROVIDER );
 	}
 
-	private boolean isPanacheType(TypeElement type) {
-		return context.usesQuarkusOrm() && isOrmPanacheType( type )
-			|| context.usesQuarkusReactive() && isReactivePanacheType( type );
-	}
-
-	private boolean isOrmPanacheType(TypeElement type) {
-		return implementsInterface( type, PANACHE_ORM_REPOSITORY_BASE )
-			|| extendsClass( type, PANACHE_ORM_ENTITY_BASE );
-	}
-
-	private boolean isReactivePanacheType(TypeElement type) {
-		return implementsInterface( type, PANACHE_REACTIVE_REPOSITORY_BASE )
-			|| extendsClass( type, PANACHE_REACTIVE_ENTITY_BASE );
-	}
-
-	private boolean isQuarkusDataType(TypeElement type) {
-		final QuarkusDataTypeNames typeNames = context.quarkusDataTypeNames();
-		return implementsInterface( type, typeNames.entityMarker() )
-			|| isQuarkusDataRepository( type, typeNames );
-	}
-
-	public static boolean isQuarkusDataRepository(TypeElement type, QuarkusDataTypeNames typeNames) {
-		return implementsInterface( type, typeNames.managedBlockingRepositoryBase() )
-			|| implementsInterface( type, typeNames.statelessBlockingRepositoryBase() )
-			|| implementsInterface( type, typeNames.managedReactiveRepositoryBase() )
-			|| implementsInterface( type, typeNames.statelessReactiveRepositoryBase() );
-	}
-
 	/**
 	 * If there is a session getter method, we generate an instance
 	 * variable backing it, together with a constructor that initializes
@@ -1054,7 +1047,7 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 							context.addNonnullAnnotation(),
 							method != null,
 							jakartaDataRepository,
-							quarkusInjection
+							context.getExtension().qualifierAnnotation()
 					)
 			);
 			if ( isProvidedSessionAccess( sessionType ) ) {
@@ -1069,107 +1062,6 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 	}
 
 	/**
-	 * For Quarkus, we generate a constructor with injection for EntityManager in ORM,
-	 * and in HR, we define the static session getter.
-	 * For Panache 2, we can use the element to figure out what kind of session we want since this
-	 * is for repositories
-	 */
-	private String setupQuarkusRepositoryConstructor(@Nullable ExecutableElement getter, @Nullable TypeElement element) {
-		// FIXME: probably go in this branch if we have a getter too?
-		if ( isBlockingFavored( element ) ) {
-			final QuarkusDataTypeNames typeNames = context.quarkusDataTypeNames();
-			final String name = quarkusSessionGetterName( getter, element, typeNames );
-			final String sessionType = quarkusSessionType( getter, element, typeNames );
-			putMember( name,
-					new RepositoryConstructor(
-							this,
-							getConstructorName(),
-							name,
-							sessionType,
-							getSessionVariableName( sessionType ),
-							dataStore(),
-							context.addInjectAnnotation(),
-							context.addNonnullAnnotation(),
-							false,
-							false,
-							true
-					)
-			);
-			return sessionType;
-		}
-		else {
-			importType( Constants.QUARKUS_SESSION_OPERATIONS );
-			// use this getter to get the method, do not generate an injection point for its type
-			if ( element != null && isQuarkusDataStatelessReactiveRepository( element, context.quarkusDataTypeNames() ) ) {
-				sessionGetter = "SessionOperations.getStatelessSession()";
-				return UNI_MUTINY_STATELESS_SESSION;
-			}
-			else {
-				sessionGetter = "SessionOperations.getSession()";
-				return UNI_MUTINY_SESSION;
-			}
-		}
-	}
-
-	private static String quarkusSessionGetterName(@Nullable ExecutableElement getter, @Nullable TypeElement element,
-			QuarkusDataTypeNames typeNames) {
-		if ( getter != null ) {
-			return getter.getSimpleName().toString();
-		}
-		else if ( element != null && isQuarkusDataStatelessBlockingRepository( element, typeNames ) ) {
-			return "getStatelessSession";
-		}
-		else { // good default
-			return "getSession";
-		}
-	}
-
-	private String quarkusSessionType(@Nullable ExecutableElement getter, @Nullable TypeElement element,
-			QuarkusDataTypeNames typeNames) {
-		if ( getter != null ) {
-			return fullReturnType( getter );
-		}
-		else if ( element != null && isQuarkusDataStatelessBlockingRepository( element, typeNames ) ) {
-			return HIB_STATELESS_SESSION;
-		}
-		else { // good default
-			return HIB_SESSION;
-		}
-	}
-
-	private boolean isBlockingFavored(@Nullable TypeElement element) {
-		if ( element != null ) {
-			final QuarkusDataTypeNames typeNames = context.quarkusDataTypeNames();
-			if ( context.usesQuarkusDataHibernate()
-					&& isQuarkusDataRepository( element, typeNames ) ) {
-				return isQuarkusDataBlockingRepository( element, typeNames );
-			}
-			else {
-				// look for any annotated method, see if they return a Uni
-				for ( ExecutableElement method : methodsIn( context.getAllMembers( element ) ) ) {
-					// trust the first method, no need to look for them all
-					if ( containsAnnotation( method, HQL, SQL, JD_QUERY, FIND, JD_FIND ) ) {
-						return !isUni( method.getReturnType() );
-					}
-				}
-			}
-		}
-		return context.usesQuarkusOrm();
-	}
-
-	private static boolean isQuarkusDataBlockingRepository(@NonNull TypeElement element, QuarkusDataTypeNames typeNames) {
-		return implementsInterface( element, typeNames.managedBlockingRepositoryBase() )
-			|| implementsInterface( element, typeNames.statelessBlockingRepositoryBase() );
-	}
-
-	private static boolean isQuarkusDataStatelessReactiveRepository(@NonNull TypeElement element, QuarkusDataTypeNames typeNames) {
-		return implementsInterface( element, typeNames.statelessReactiveRepositoryBase() );
-	}
-
-	private static boolean isQuarkusDataStatelessBlockingRepository(@NonNull TypeElement element, QuarkusDataTypeNames typeNames) {
-		return implementsInterface( element, typeNames.statelessBlockingRepositoryBase() );
-	}
-
 	/**
 	 * The session getter method doesn't have to be a JavaBeans-style
 	 * getter. It can be any method with no parameters and one of the
@@ -2354,7 +2246,8 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		return getSessionVariableName( sessionType );
 	}
 
-	private String getSessionVariableName(String sessionType) {
+	@Override
+	public String getSessionVariableName(String sessionType) {
 		if ( isProvidedSessionAccess( sessionType) ) {
 			return sessionGetter;
 		}
@@ -2975,7 +2868,8 @@ public class AnnotationMetaEntity extends AnnotationMeta implements AnnotationMe
 		putMember( attribute.getPropertyName() + paramTypes, attribute );
 	}
 
-	private String fullReturnType(ExecutableElement method) {
+	@Override
+	public String fullReturnType(ExecutableElement method) {
 		return typeAsString( memberMethodType( method ).getReturnType() );
 	}
 
