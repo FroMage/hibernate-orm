@@ -4,6 +4,8 @@
  */
 package org.hibernate.processor.spi;
 
+import javax.lang.model.element.TypeElement;
+
 /**
  * SPI for providing the type names used by the Quarkus Data / Panache framework.
  * <p>
@@ -24,4 +26,6 @@ public interface QuarkusDataTypeNames {
 	String managedReactiveRepositoryBase();
 
 	String statelessReactiveRepositoryBase();
+
+	void addRepositoryMembers(TypeElement element, AnnotationMetaEntityContext context);
 }

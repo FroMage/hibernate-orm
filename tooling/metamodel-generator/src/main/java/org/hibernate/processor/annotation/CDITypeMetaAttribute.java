@@ -10,12 +10,12 @@ import org.hibernate.processor.model.Metamodel;
 
 public class CDITypeMetaAttribute implements MetaAttribute {
 
-	private final AnnotationMetaEntity annotationMetaEntity;
+	private final Metamodel metamodel;
 	private final String typeName;
 	private final Object superTypeName;
 
-	public CDITypeMetaAttribute(AnnotationMetaEntity annotationMetaEntity, String className, String superTypeName) {
-		this.annotationMetaEntity = annotationMetaEntity;
+	public CDITypeMetaAttribute(Metamodel metamodel, String className, String superTypeName) {
+		this.metamodel = metamodel;
 		this.superTypeName = superTypeName;
 		this.typeName = className;
 	}
@@ -73,8 +73,8 @@ public class CDITypeMetaAttribute implements MetaAttribute {
 	}
 
 	void modifiers(StringBuilder declaration) {
-		annotationMetaEntity.importType("jakarta.annotation.Generated");
-		annotationMetaEntity.importType("jakarta.enterprise.context.Dependent");
+		metamodel.importType("jakarta.annotation.Generated");
+		metamodel.importType("jakarta.enterprise.context.Dependent");
 		declaration
 				.append( "\n@Dependent\n" )
 				.append( "@Generated(\"" )
@@ -86,7 +86,7 @@ public class CDITypeMetaAttribute implements MetaAttribute {
 
 	@Override
 	public Metamodel getHostingEntity() {
-		return annotationMetaEntity;
+		return metamodel;
 	}
 
 }
